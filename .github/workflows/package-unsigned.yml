@@ -1,0 +1,106 @@
+name: Build unsigned pkg
+
+# Builds Dialog.app (with dialogcli and the notifier helpers) on a GitHub-hosted
+# macOS runner and packages it with the same install layout and scripts as the
+# official release pkg. The output is UNSIGNED and not notarized — it's for
+# testing this fork, not for distribution.
+
+on:
+  push:
+    branches:
+      - preset1-optional-items
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and package
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The project targets macOS 15 and was last upgraded with Xcode 26.5.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.5.app
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -project dialog.xcodeproj \
+            -scheme "Dialog App Bundle" \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            -destination 'generic/platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package
+        id: package
+        run: |
+          app="build/DerivedData/Build/Products/Release/Dialog.app"
+          test -d "$app"
+          test -x "$app/Contents/MacOS/dialogcli"
+
+          version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+          short_sha=$(git rev-parse --short HEAD)
+          pkg_version="${version}-fork.${short_sha}"
+
+          root="build/pkgroot"
+          dest="$root/Library/Application Support/Dialog"
+          mkdir -p "$dest"
+          ditto "$app" "$dest/Dialog.app"
+
+          mkdir -p build/out
+          pkg="build/out/dialog-${pkg_version}-unsigned.pkg"
+          pkgbuild \
+            --root "$root" \
+            --identifier au.csiro.dialogcli \
+            --version "$version" \
+            --install-location / \
+            --scripts dialog/Package/Scripts \
+            "$pkg"
+
+          pkgutil --payload-files "$pkg" | grep -q 'Dialog.app/Contents/MacOS/dialogcli'
+          echo "pkg=$pkg" >> "$GITHUB_OUTPUT"
+          echo "pkg_version=$pkg_version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload pkg
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dialog-${{ steps.package.outputs.pkg_version }}-unsigned
+          path: ${{ steps.package.outputs.pkg }}
+          if-no-files-found: error
+
+    outputs:
+      pkg_version: ${{ steps.package.outputs.pkg_version }}
+
+  release:
+    name: Publish pre-release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download pkg
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dialog-${{ needs.build.outputs.pkg_version }}-unsigned
+          path: out
+
+      # One pre-release per commit, so a test pkg can always be traced back to
+      # the exact source it was built from.
+      - name: Create pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: fork-${{ needs.build.outputs.pkg_version }}
+        run: |
+          gh release create "$TAG" out/*.pkg \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "$TAG (unsigned test build)" \
+            --notes "Unsigned, un-notarized test build of $GITHUB_SHA from branch ${GITHUB_REF_NAME}. Not for distribution — Gatekeeper will block it unless installed with \`sudo installer\`, and it installs over any existing swiftDialog."

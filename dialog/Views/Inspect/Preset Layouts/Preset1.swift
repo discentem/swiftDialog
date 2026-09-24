@@ -118,9 +118,6 @@ struct Preset1View: View, InspectLayoutProtocol {
         .onChange(of: inspectState.completedItems.count) { _, _ in
             checkAutoTransitionToSummary()
         }
-        .onChange(of: inspectState.failedItems.count) { _, _ in
-            checkAutoTransitionToSummary()
-        }
         .onChange(of: currentPhase) { _, newPhase in
             // Emit phase event so IPC consumers (scripts) can react
             writePhaseEvent(newPhase)
@@ -139,7 +136,8 @@ struct Preset1View: View, InspectLayoutProtocol {
         guard currentPhase == .main,
               let summaryConfig = inspectState.config?.summaryScreen,
               summaryConfig.autoTransition != false,
-              inspectState.allRequiredItemsCompleted else { return }
+              !inspectState.items.isEmpty,
+              inspectState.completedItems.count == inspectState.items.count else { return }
         // Keep an already-complete list on screen for a minimum time before advancing, so it
         // isn't flashed past in under a second when everything was already installed. This only
         // delays the transition — it can never strand an item, so live installs are unaffected.
@@ -148,7 +146,7 @@ struct Preset1View: View, InspectLayoutProtocol {
         if elapsed < minimumDisplay {
             DispatchQueue.main.asyncAfter(deadline: .now() + (minimumDisplay - elapsed)) {
                 if currentPhase == .main,
-                   inspectState.allRequiredItemsCompleted {
+                   inspectState.completedItems.count == inspectState.items.count {
                     currentPhase = .summary
                 }
             }
